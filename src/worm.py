@@ -90,11 +90,29 @@ class Worm:
         self.keys_pressed = set()
         
         # Worm body segments for trail effect
-        self.body_segments = [(x, y) for _ in range(6)]  # 6 segments
+        self.body_segments = [(x, y) for _ in range(5)]  # 4 body segments + 1 head = 5 total
         self.segment_update_timer = 0
+        
+        # Combat system
+        self.is_dead = False
+        self.is_respawning = False  # New state for respawn period with visual effects
+        self.spawn_protection = 0.0  # Spawn protection timer
+        self.kills = 0
+        self.deaths = 0
+        self.fall_deaths = 0  # Deaths from falling
+        self.self_deaths = 0  # Deaths from own explosions
+        self.last_fall_y = y  # Track fall distance for damage
+        self.tool_used_this_frame = None  # Track tool usage for damage checking
+        self.respawn_timer = 0.0  # Time until respawn
+        self.death_position = None  # Position where worm died (for tombstone)
+        self.respawn_color_timer = 0.0  # Timer for color fluctuation during respawn
+        self.pending_death_info = None  # Store death information to return from update
         
         # Tool range limits
         self.max_reach_distance = WORM_RADIUS * 2  # How far worm can reach to dig
+        
+        # Tools mode (will be set by game)
+        self.tools_mode = "standard"  # "standard" or "unlimited"
         
         # Virtual cursor position
         self.cursor_x = x + 50  # Start cursor near worm
@@ -103,6 +121,159 @@ class Worm:
         
         # Initialize sound effects
         self._create_tool_sounds()
+        
+    def get_active_segments_count(self):
+        """Calculate number of segments based on current HP"""
+        if self.is_dead:
+            return 0
+        elif self.is_respawning:
+            return 5  # Show full worm during respawn with color effects
+            
+        hp_percentage = self.hp / self.max_hp
+        if hp_percentage > 0.8:
+            return 5  # Full health: head + 4 body segments
+        elif hp_percentage > 0.6:
+            return 4  # 80% health: head + 3 body segments  
+        elif hp_percentage > 0.4:
+            return 3  # 60% health: head + 2 body segments
+        elif hp_percentage > 0.2:
+            return 2  # 40% health: head + 1 body segment
+        elif hp_percentage > 0:
+            return 1  # 20% health: head only
+        else:
+            return 0  # 0% health: dead
+            
+    def take_damage(self, damage, source=None):
+        """Apply damage to the worm and handle death"""
+        if self.is_dead or self.is_respawning or self.spawn_protection > 0:
+            return False  # No damage during protection, respawning, or if already dead
+            
+        self.hp = max(0, self.hp - damage)
+        
+        if self.hp <= 0 and not self.is_dead and not self.is_respawning:
+            # Return information for game to handle death with relocation
+            return {'needs_death_handling': True, 'killer': source}
+        return False  # Worm survived
+        
+    def die(self, killer_worm=None, new_x=None, new_y=None):
+        """Handle worm death with immediate relocation"""
+        if self.is_dead or self.is_respawning:
+            return None
+            
+        self.is_dead = False  # Don't set as dead, set as respawning instead
+        self.is_respawning = True  # New respawning state
+        self.deaths += 1
+        self.respawn_timer = RESPAWN_TIME
+        self.respawn_color_timer = 0.0
+        self.death_position = (self.x, self.y)
+        
+        # Track different types of deaths
+        if killer_worm is None:
+            # Fall death (no killer)
+            self.fall_deaths += 1
+        elif killer_worm == self:
+            # Self death (killed by own explosion)
+            self.self_deaths += 1
+        elif killer_worm and killer_worm != self:
+            # Killed by another player
+            killer_worm.kills += 1
+            
+        # Calculate tombstone resources (20% of current resources, rounded up)
+        tombstone_gas = max(1, int(self.gas * TOMBSTONE_RESOURCE_PERCENTAGE + 0.5))
+        tombstone_dynamite = max(0, int(self.dynamite_count * TOMBSTONE_RESOURCE_PERCENTAGE + 0.5))
+        
+        # Create tombstone data to be handled by game
+        tombstone_data = {
+            'x': self.x,
+            'y': self.y,
+            'gas': tombstone_gas,
+            'dynamite': tombstone_dynamite,
+            'deceased_name': getattr(self, 'name', 'Unknown Worm')
+        }
+        
+        # Reduce worm's resources (they lost some in the tombstone)
+        self.gas = max(0, self.gas - tombstone_gas)
+        self.dynamite_count = max(0, self.dynamite_count - tombstone_dynamite)
+        
+        # Immediately relocate worm if position provided
+        if new_x is not None and new_y is not None:
+            self.x = float(new_x)
+            self.y = float(new_y)
+            # Reset physics
+            self.vel_x = 0
+            self.vel_y = 0
+            self.on_ground = False
+            self.can_jump = False
+            
+        return tombstone_data
+    
+    def respawn(self, x=None, y=None):
+        """Complete the respawn process (called after respawn timer expires)"""
+        if not self.is_respawning:
+            return False
+            
+        # Transition from respawning to alive with spawn protection
+        self.is_respawning = False
+        self.is_dead = False
+        self.hp = self.max_hp
+        self.spawn_protection = SPAWN_PROTECTION_TIME
+        self.respawn_timer = 0.0
+        self.respawn_color_timer = 0.0
+        
+        # Restore resources to starting amounts
+        self.gas = STARTING_GAS
+        self.dynamite_count = DYNAMITE_COUNT_START
+        
+        # Update position if provided (though should already be set in die())
+        if x is not None and y is not None:
+            self.x = float(x)
+            self.y = float(y)
+            # Reset body segments to new position
+            self.body_segments = [(x, y) for _ in range(len(self.body_segments))]
+        
+        # Clear any pending tool actions
+        if hasattr(self, 'dig_request'):
+            delattr(self, 'dig_request')
+        self.tool_used_this_frame = None
+        
+        return True
+    
+    def end_spawn_protection(self):
+        """End spawn protection early (called when worm tries to use tools)"""
+        self.spawn_protection = 0.0
+    
+    def update_respawn_timer(self, dt):
+        """Update respawn timer and color fluctuation for respawning worms"""
+        if self.is_respawning and self.respawn_timer > 0:
+            self.respawn_timer -= dt
+            self.respawn_color_timer += dt
+            return self.respawn_timer <= 0  # Return True when ready to complete respawn
+        return False
+        
+    def get_render_color(self):
+        """Get the current color for rendering based on worm state"""
+        if self.is_respawning:
+            # Fluctuate between black and worm color during respawn
+            # Use a sine wave to create smooth color transitions
+            import math
+            fluctuation = (math.sin(self.respawn_color_timer * 4) + 1) / 2  # 0-1 range
+            # Interpolate between black (0,0,0) and worm color
+            r = int(self.color[0] * fluctuation)
+            g = int(self.color[1] * fluctuation)
+            b = int(self.color[2] * fluctuation)
+            return (r, g, b)
+        elif self.spawn_protection > 0:
+            # Fluctuate between white and worm color during spawn protection
+            import math
+            fluctuation = (math.sin(self.spawn_protection * 6 * math.pi) + 1) / 2  # 0-1 range, 6 cycles per second
+            # Interpolate between white (255,255,255) and worm color
+            white = (255, 255, 255)
+            r = int(white[0] * fluctuation + self.color[0] * (1 - fluctuation))
+            g = int(white[1] * fluctuation + self.color[1] * (1 - fluctuation))
+            b = int(white[2] * fluctuation + self.color[2] * (1 - fluctuation))
+            return (r, g, b)
+        else:
+            return self.color
         
     def _create_tool_sounds(self):
         """Create sound effects for tools"""
@@ -253,22 +424,23 @@ class Worm:
 
                 # Jump
                 if event.key == pygame.K_SPACE:
-                    if self.on_ground and self.can_jump:
+                    if self.on_ground and self.can_jump and not self.is_respawning:
                         self.vel_y = JUMP_VELOCITY
                         self.on_ground = False
                         self.can_jump = False
 
-                # Use tool (F)
+                # Use tool (F) - disabled during respawning and spawn protection
                 if event.key == pygame.K_f:
-                    if self.current_tool == "dynamite":
-                        if self.dynamite_count > 0:
-                            self.charging_power = True
-                            self.charge_start_time = time.time()
-                            self.power_level = 0
+                    if not self.is_respawning and self.spawn_protection <= 0:
+                        if self.current_tool == "dynamite":
+                            if self.dynamite_count > 0:
+                                self.charging_power = True
+                                self.charge_start_time = time.time()
+                                self.power_level = 0
+                            else:
+                                pass  # No dynamite
                         else:
-                            pass  # No dynamite
-                    else:
-                        self._use_tool(self.cursor_x, self.cursor_y)
+                            self._use_tool(self.cursor_x, self.cursor_y)
 
             elif player_id == 2:
                 # , and - cycle tools for player 2
@@ -281,43 +453,46 @@ class Worm:
 
                 # Jump (Right Ctrl)
                 if event.key == pygame.K_RCTRL:
-                    if self.on_ground and self.can_jump:
+                    if self.on_ground and self.can_jump and not self.is_respawning:
                         self.vel_y = JUMP_VELOCITY
                         self.on_ground = False
                         self.can_jump = False
 
-                # Use tool (.)
+                # Use tool (.) - disabled during respawning and spawn protection
                 if event.key == pygame.K_PERIOD:
-                    if self.current_tool == "dynamite":
-                        if self.dynamite_count > 0:
-                            self.charging_power = True
-                            self.charge_start_time = time.time()
-                            self.power_level = 0
+                    if not self.is_respawning and self.spawn_protection <= 0:
+                        if self.current_tool == "dynamite":
+                            if self.dynamite_count > 0:
+                                self.charging_power = True
+                                self.charge_start_time = time.time()
+                                self.power_level = 0
+                            else:
+                                pass  # No dynamite
                         else:
-                            pass  # No dynamite
-                    else:
-                        self._use_tool(self.cursor_x, self.cursor_y)
+                            self._use_tool(self.cursor_x, self.cursor_y)
 
         elif event.type == pygame.KEYUP:
             if event.key in self.keys_pressed:
                 self.keys_pressed.remove(event.key)
 
-            # Dynamite release handling
+            # Dynamite release handling - only throw if not during respawning and not protected
             if player_id == 1 and event.key == pygame.K_f and self.charging_power:
                 self.charging_power = False
-                if self.current_tool == "dynamite" and self.dynamite_count > 0:
+                if (self.current_tool == "dynamite" and self.dynamite_count > 0 and 
+                    not self.is_respawning and self.spawn_protection <= 0):
                     target_x, target_y = self._calculate_tool_target_position()
                     self._throw_dynamite(target_x, target_y, self.power_level)
                 self.power_level = 0
             elif player_id == 2 and event.key == pygame.K_PERIOD and self.charging_power:
                 self.charging_power = False
-                if self.current_tool == "dynamite" and self.dynamite_count > 0:
+                if (self.current_tool == "dynamite" and self.dynamite_count > 0 and 
+                    not self.is_respawning and self.spawn_protection <= 0):
                     target_x, target_y = self._calculate_tool_target_position()
                     self._throw_dynamite(target_x, target_y, self.power_level)
                 self.power_level = 0
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1:
+            if event.button == 1 and not self.is_respawning and self.spawn_protection <= 0:
                 self._use_tool(self.cursor_x, self.cursor_y)
 
         elif event.type == pygame.MOUSEMOTION:
@@ -328,9 +503,9 @@ class Worm:
         # Calculate distance from worm to target
         distance = math.sqrt((target_x - self.x)**2 + (target_y - self.y)**2)
         
-        # Check gas requirement for torch
+        # Check gas requirement for torch (unless in unlimited mode)
         if self.current_tool == "torch":
-            if self.gas < TORCH_GAS_COST:
+            if self.tools_mode != "unlimited" and self.gas < TORCH_GAS_COST:
                 print("Not enough gas for torch! Find gas bottles.")
                 return
         
@@ -344,12 +519,15 @@ class Worm:
                 
         elif self.current_tool == "torch":
             # Torch creates a cone using the smooth interpolated direction
-            if self.gas >= TORCH_GAS_COST:
+            if self.tools_mode == "unlimited" or self.gas >= TORCH_GAS_COST:
                 direction_angle = self.tool_current_angle
                 
                 # Dig starts from worm position, not target position
                 self.dig_request = (self.x, self.y, self.current_tool, direction_angle)
-                self.gas -= TORCH_GAS_COST  # Consume gas
+                
+                # Consume gas only in standard mode
+                if self.tools_mode != "unlimited":
+                    self.gas -= TORCH_GAS_COST  # Consume gas
                 
                 # Create fire effects
                 self._create_fire_particles(self.x, self.y, TORCH_CONE_ANGLE, direction_angle)
@@ -363,27 +541,28 @@ class Worm:
                 pass  # Not enough gas for torch
                 
         elif self.current_tool == "laser":
-            # Check laser battery before firing
-            if self.laser_battery >= 10.0:  # Need at least 10% battery to fire
+            # Check laser battery before firing (unless in unlimited mode)
+            if self.tools_mode == "unlimited" or self.laser_battery >= 10.0:  # Need at least 10% battery to fire
                 target_x, target_y = self._calculate_tool_target_position()
                 self.dig_request = (target_x, target_y, self.current_tool, "line_from_worm")
                 
-                # Consume battery and track usage
-                current_time = time.time()
-                self.laser_battery -= 10.0  # Each shot costs 10% battery
-                
-                # Track rapid usage for cooldown system
-                if current_time - self.laser_last_use_time < 2.0:  # If used within 2 seconds
-                    self.laser_use_count += 1
-                else:
-                    self.laser_use_count = 1  # Reset if enough time passed
-                
-                self.laser_last_use_time = current_time
-                
-                # Start cooldown if used too rapidly
-                if self.laser_use_count >= 10:
-                    self.laser_cooldown_timer = 5.0  # 5 second cooldown
-                    self.laser_use_count = 0
+                # Consume battery and track usage only in standard mode
+                if self.tools_mode != "unlimited":
+                    current_time = time.time()
+                    self.laser_battery -= 10.0  # Each shot costs 10% battery
+                    
+                    # Track rapid usage for cooldown system
+                    if current_time - self.laser_last_use_time < 2.0:  # If used within 2 seconds
+                        self.laser_use_count += 1
+                    else:
+                        self.laser_use_count = 1  # Reset if enough time passed
+                    
+                    self.laser_last_use_time = current_time
+                    
+                    # Start cooldown if used too rapidly
+                    if self.laser_use_count >= 10:
+                        self.laser_cooldown_timer = 5.0  # 5 second cooldown
+                        self.laser_use_count = 0
                 
                 # Play laser sound
                 if hasattr(self, 'laser_sound') and self.laser_sound:
@@ -605,13 +784,21 @@ class Worm:
     
     def _throw_dynamite(self, target_x, target_y, power):
         """Throw dynamite towards target with given power"""
-        if self.dynamite_count <= 0:
+        # Check dynamite count (unless in unlimited mode)
+        if self.tools_mode != "unlimited" and self.dynamite_count <= 0:
+            return
+        
+        # Prevent dynamite throwing during respawning or spawn protection
+        if self.is_respawning or self.spawn_protection > 0:
             return
             
         # Create thrown dynamite
         dynamite = ThrownDynamite(self.x, self.y, target_x, target_y, power)
         self.thrown_dynamites.append(dynamite)
-        self.dynamite_count -= 1
+        
+        # Consume dynamite only in standard mode
+        if self.tools_mode != "unlimited":
+            self.dynamite_count -= 1
         
         power_percent = (power / MAX_POWER) * 100
         
@@ -620,13 +807,13 @@ class Worm:
         points = []
         
         # Calculate velocity to match ThrownDynamite physics
-        base_speed = 200  # Base throw speed
+        base_speed = 250  # Increased base throw speed for higher arc
         speed_multiplier = 0.5 + (power / 100) * 1.5  # 0.5x to 2x speed
         velocity = base_speed * speed_multiplier
         
         # Set velocity components with same logic as ThrownDynamite
         vel_x = math.cos(angle) * velocity
-        vel_y = math.sin(angle) * velocity - 50  # Slight upward bias for arc
+        vel_y = math.sin(angle) * velocity - 75  # Increased upward bias for higher arc
         
         # Simulate trajectory with gravity
         x, y = start_x, start_y
@@ -738,20 +925,21 @@ class Worm:
             if self.laser_battery < 100.0:
                 self.laser_battery = min(100.0, self.laser_battery + 10.0 * dt)
         
-        # Handle horizontal movement input based on player
+        # Handle horizontal movement input based on player (disabled during respawning)
         horizontal_input = 0
         
-        # Player 1 uses A/D
-        if pygame.K_a in self.keys_pressed:
-            horizontal_input -= 1
-        if pygame.K_d in self.keys_pressed:
-            horizontal_input += 1
-            
-        # Player 2 uses Left/Right arrows
-        if pygame.K_LEFT in self.keys_pressed:
-            horizontal_input -= 1
-        if pygame.K_RIGHT in self.keys_pressed:
-            horizontal_input += 1
+        if not self.is_respawning:  # Only allow movement when not respawning
+            # Player 1 uses A/D
+            if pygame.K_a in self.keys_pressed:
+                horizontal_input -= 1
+            if pygame.K_d in self.keys_pressed:
+                horizontal_input += 1
+                
+            # Player 2 uses Left/Right arrows
+            if pygame.K_LEFT in self.keys_pressed:
+                horizontal_input -= 1
+            if pygame.K_RIGHT in self.keys_pressed:
+                horizontal_input += 1
             
         # Apply horizontal movement
         if horizontal_input != 0:
@@ -777,35 +965,36 @@ class Worm:
             if self.vel_y > TERMINAL_VELOCITY:
                 self.vel_y = TERMINAL_VELOCITY
         
-        # Handle cursor movement - Player-specific aiming
+        # Handle cursor movement - Player-specific aiming (disabled during respawning)
         # Player 1 uses W/S, Player 2 uses Up/Down
         cursor_vel_x = 0
         cursor_vel_y = 0
         
-        # Player-specific cursor movement
-        if hasattr(self, 'player_id'):
-            if self.player_id == 1:
-                # Player 1: W/S for aiming
+        if not self.is_respawning:  # Only allow cursor movement when not respawning
+            # Player-specific cursor movement
+            if hasattr(self, 'player_id'):
+                if self.player_id == 1:
+                    # Player 1: W/S for aiming
+                    if pygame.K_w in self.keys_pressed:
+                        cursor_vel_y -= self.cursor_speed
+                    if pygame.K_s in self.keys_pressed:
+                        cursor_vel_y += self.cursor_speed
+                elif self.player_id == 2:
+                    # Player 2: Up/Down for aiming
+                    if pygame.K_UP in self.keys_pressed:
+                        cursor_vel_y -= self.cursor_speed
+                    if pygame.K_DOWN in self.keys_pressed:
+                        cursor_vel_y += self.cursor_speed
+            else:
+                # Fallback: if no player_id, allow both control schemes
                 if pygame.K_w in self.keys_pressed:
                     cursor_vel_y -= self.cursor_speed
                 if pygame.K_s in self.keys_pressed:
                     cursor_vel_y += self.cursor_speed
-            elif self.player_id == 2:
-                # Player 2: Up/Down for aiming
                 if pygame.K_UP in self.keys_pressed:
                     cursor_vel_y -= self.cursor_speed
                 if pygame.K_DOWN in self.keys_pressed:
                     cursor_vel_y += self.cursor_speed
-        else:
-            # Fallback: if no player_id, allow both control schemes
-            if pygame.K_w in self.keys_pressed:
-                cursor_vel_y -= self.cursor_speed
-            if pygame.K_s in self.keys_pressed:
-                cursor_vel_y += self.cursor_speed
-            if pygame.K_UP in self.keys_pressed:
-                cursor_vel_y -= self.cursor_speed
-            if pygame.K_DOWN in self.keys_pressed:
-                cursor_vel_y += self.cursor_speed
             
         # Update cursor position
         self.cursor_x += cursor_vel_x * dt
@@ -815,21 +1004,25 @@ class Worm:
         self.cursor_x = max(0, min(SCREEN_WIDTH, self.cursor_x))
         self.cursor_y = max(0, min(SCREEN_HEIGHT, self.cursor_y))
             
-        # Update power charging
-        if self.charging_power:
+        # Update power charging (disabled during respawning and spawn protection)
+        if self.charging_power and not self.is_respawning and self.spawn_protection <= 0:
             elapsed = time.time() - self.charge_start_time
             self.power_level = min(elapsed * POWER_CHARGE_RATE, MAX_POWER)
+        elif self.is_respawning or self.spawn_protection > 0:
+            # Cancel power charging if respawning or protected
+            self.charging_power = False
+            self.power_level = 0
             
-        # Update tool direction smoothly
-        self._update_tool_direction(dt)
+        # Update tool direction smoothly (disabled during respawning)
+        if not self.is_respawning:
+            self._update_tool_direction(dt)
         
         # Update thrown dynamites
         for dynamite in self.thrown_dynamites[:]:  # Copy list to avoid modification issues
             if dynamite.update(dt, terrain):
-                # Dynamite exploded
+                # Dynamite exploded - dig terrain but don't remove yet (damage check will handle removal)
                 dyn_x, dyn_y = dynamite.get_position()
                 terrain.dig(dyn_x, dyn_y, DYNAMITE_RADIUS, "dynamite")
-                self.thrown_dynamites.remove(dynamite)
                 
         # Update torch fire effects
         if self.torch_fire_timer > 0:
@@ -842,8 +1035,9 @@ class Worm:
             if self.laser_fire_timer <= 0:
                 self.laser_firing = False
         
-        # Apply physics-based movement with collision detection
-        self._apply_physics_movement(dt, terrain)
+        # Apply physics-based movement with collision detection (disabled during respawning)
+        if not self.is_respawning:
+            self._apply_physics_movement(dt, terrain)
         
         # Check for item collection
         self._check_item_collection(terrain)
@@ -868,7 +1062,7 @@ class Worm:
         
         # Very minimal top boundary check - only prevent going completely off screen
         if self.y < -50:  # Allow some margin above screen
-            self.y = -50
+            self.y = UI_HEIGHT + 50  # Place just below UI area, not above screen
             self.vel_y = max(0, self.vel_y)
         
         # Update body segments for worm-like movement
@@ -877,8 +1071,19 @@ class Worm:
             self._update_body_segments()
             self.segment_update_timer = 0
         
+        # Clear tool usage from previous frame
+        self.tool_used_this_frame = None
+        
         # Handle tool usage
         if hasattr(self, 'dig_request'):
+            # Track tool usage for damage checking
+            self.tool_used_this_frame = {
+                'tool': self.dig_request[2],
+                'target_x': self.dig_request[0],
+                'target_y': self.dig_request[1],
+                'attacker_pos': (self.body_segments[0][0], self.body_segments[0][1])
+            }
+            
             if len(self.dig_request) == 4:
                 if self.dig_request[3] == "line_from_worm":
                     # Special handling for laser
@@ -887,6 +1092,7 @@ class Worm:
                 else:
                     # Torch with direction angle
                     target_x, target_y, tool, direction_angle = self.dig_request
+                    self.tool_used_this_frame['direction_angle'] = direction_angle
                     terrain.dig(target_x, target_y, TORCH_RANGE, tool, direction_angle)
             else:
                 # Regular digging for other tools
@@ -901,15 +1107,36 @@ class Worm:
             if item_type == 1:  # ItemType.GAS_BOTTLE
                 self.gas = min(self.gas + GAS_BOTTLE_AMOUNT, MAX_GAS)
                 print(f"Found gas bottle! Gas: {self.gas}/{MAX_GAS}")
-            
+        
+        # Return any pending death information for the game to handle
+        death_info = self.pending_death_info
+        self.pending_death_info = None  # Clear after returning
+        return death_info
     def _apply_physics_movement(self, dt, terrain):
         """Apply physics-based movement with proper collision detection and slope climbing"""
-        # Store old position
+        if self.is_dead:
+            return
+            
+        # Store old position and velocity for fall damage calculation
         old_x, old_y = self.x, self.y
+        old_vel_y = self.vel_y
+        was_falling = not self.on_ground and old_vel_y > 0
         
         # Calculate new position
         new_x = self.x + self.vel_x * dt
         new_y = self.y + self.vel_y * dt
+        
+        # Safety check: prevent extreme position jumps that could cause teleportation
+        max_position_change = 200  # Maximum pixels per frame
+        if abs(new_x - self.x) > max_position_change:
+            new_x = self.x + (max_position_change if new_x > self.x else -max_position_change)
+            self.vel_x = 0  # Reset velocity that caused the extreme movement
+        if abs(new_y - self.y) > max_position_change:
+            new_y = self.y + (max_position_change if new_y > self.y else -max_position_change)
+            self.vel_y = min(self.vel_y, 500)  # Cap downward velocity but allow normal falling
+        
+        # Track if we land this frame for fall damage
+        landed_this_frame = False
         
         # Check horizontal movement with slope climbing
         horizontal_blocked = False
@@ -952,9 +1179,31 @@ class Worm:
             # Hit something vertically
             if self.vel_y > 0:
                 # Hit ground while falling
+                was_on_ground_before = self.on_ground
                 self.on_ground = True
                 self.can_jump = True
+                
+                # Calculate fall damage if we were falling and hit ground
+                if was_falling and not was_on_ground_before and old_vel_y > FALL_DAMAGE_VELOCITY_THRESHOLD:
+                    # Calculate fall distance based on velocity and time
+                    # Approximate fall distance using physics: distance = velocity * time
+                    fall_distance = old_vel_y * dt * 60  # Convert to approximate pixels
+                    
+                    # More precise calculation: use the distance we would have fallen
+                    distance_fallen = abs(new_y - old_y)
+                    if distance_fallen >= FALL_DAMAGE_START_HEIGHT:
+                        # Non-linear damage scaling: damage increases with fall distance
+                        damage = max(1, int((distance_fallen - FALL_DAMAGE_START_HEIGHT) * FALL_DAMAGE_MULTIPLIER))
+                        if damage > 0:
+                            damage_result = self.take_damage(damage, None)  # No killer for fall damage
+                            # Store death information to return from update method
+                            if damage_result and isinstance(damage_result, dict) and damage_result.get('needs_death_handling'):
+                                self.pending_death_info = {'needs_death_handling': True, 'damage': damage, 'killer': None}
+                            # Update last fall position for tracking
+                            self.last_fall_y = self.y
+                
                 self.vel_y = 0
+                landed_this_frame = True
                 
                 # Snap to ground level to prevent sinking
                 # But don't do this correction if we're near the top of the screen (wrapped worms)
@@ -1030,15 +1279,61 @@ class Worm:
         return len(ground_contacts) > 0  # If we have any ground contact, assume we can stay
             
     def _check_collision(self, x, y, terrain):
-        """Check if the worm would collide with terrain at the given position"""
-        # Check multiple points around the worm's circumference
-        for angle in range(0, 360, 45):
-            rad = math.radians(angle)
-            check_x = x + math.cos(rad) * WORM_RADIUS
-            check_y = y + math.sin(rad) * WORM_RADIUS
+        """Check if the worm would collide with terrain at the given position - multi-segment version"""
+        if self.is_dead:
+            return False
             
-            if terrain.is_solid(check_x, check_y):
-                return True
+        active_count = self.get_active_segments_count()
+        if active_count == 0:
+            return False
+            
+        # For collision checking, we use the proposed position for the head
+        # and current positions for body segments
+        temp_segments = self.body_segments.copy()
+        if len(temp_segments) > 0:
+            temp_segments[0] = (x, y)  # Head at proposed position
+            
+        # Check collision for active segments only
+        for i in range(min(active_count, len(temp_segments))):
+            seg_x, seg_y = temp_segments[i]
+            segment_radius = WORM_RADIUS - (i * 2) if i > 0 else WORM_RADIUS
+            if segment_radius <= 2:
+                continue
+                
+            # Check multiple points around this segment's circumference
+            for angle in range(0, 360, 45):
+                rad = math.radians(angle)
+                check_x = seg_x + math.cos(rad) * segment_radius
+                check_y = seg_y + math.sin(rad) * segment_radius
+                
+                if terrain.is_solid(check_x, check_y):
+                    return True
+        return False
+        
+    def check_worm_collision(self, other_worm):
+        """Check if this worm collides with another worm"""
+        if self.is_dead or other_worm.is_dead:
+            return False
+            
+        my_active = self.get_active_segments_count()
+        other_active = other_worm.get_active_segments_count()
+        
+        for i in range(min(my_active, len(self.body_segments))):
+            my_x, my_y = self.body_segments[i]
+            my_radius = WORM_RADIUS - (i * 2) if i > 0 else WORM_RADIUS
+            if my_radius <= 2:
+                continue
+                
+            for j in range(min(other_active, len(other_worm.body_segments))):
+                other_x, other_y = other_worm.body_segments[j]
+                other_radius = WORM_RADIUS - (j * 2) if j > 0 else WORM_RADIUS
+                if other_radius <= 2:
+                    continue
+                    
+                # Check distance between segment centers
+                distance = math.sqrt((my_x - other_x)**2 + (my_y - other_y)**2)
+                if distance < (my_radius + other_radius):
+                    return True
         return False
         
     def _update_body_segments(self):
@@ -1067,13 +1362,25 @@ class Worm:
         
     def render(self, screen, camera_x, camera_y):
         """Render the worm and its indicators"""
-        # Use the worm's individual color, or default if not set
-        worm_color = getattr(self, 'color', WORM_COLOR)
+        if self.is_dead:
+            return
+            
+        # Get current render color based on worm state (respawning, spawn protection, etc.)
+        worm_color = self.get_render_color()
         # Make body color slightly darker than head color
         body_color = tuple(max(0, c - 40) for c in worm_color)
         
-        # Render worm segments
-        for i, (x, y) in enumerate(self.body_segments):
+        # Add spawn protection visual effect
+        if self.spawn_protection > 0:
+            # Flashing effect during spawn protection
+            flash_intensity = int(128 + 127 * math.sin(pygame.time.get_ticks() * 0.01))
+            worm_color = tuple(min(255, c + flash_intensity // 3) for c in worm_color)
+            body_color = tuple(min(255, c + flash_intensity // 3) for c in body_color)
+        
+        # Render active segments only
+        active_count = self.get_active_segments_count()
+        for i in range(min(active_count, len(self.body_segments))):
+            x, y = self.body_segments[i]
             screen_x = x - camera_x
             screen_y = y - camera_y
             

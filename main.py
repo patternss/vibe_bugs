@@ -8,6 +8,7 @@ import sys
 from src.game import Game
 from src.menu import GameMenu
 from src.music import MusicSystem
+from src.endgame_stats import show_endgame_stats
 from src.config import SCREEN_WIDTH, SCREEN_HEIGHT, FPS
 
 def main():
@@ -17,7 +18,7 @@ def main():
     
     # Create the game window
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("Worm Digging Adventure")
+    pygame.display.set_caption("Vibe Bugs")
     
     # Initialize music system
     music_system = MusicSystem()
@@ -61,7 +62,16 @@ def main():
         if game_state == "menu":
             menu.update(dt)
         elif game_state == "playing":
-            game.update(dt)
+            result = game.update(dt)
+            if result == "show_endgame_stats":
+                # Show end game statistics screen
+                game_stats = game.get_game_stats()
+                continue_to_menu = show_endgame_stats(screen, game_stats)
+                if continue_to_menu:
+                    game_state = "menu"
+                    game = None
+                else:
+                    running = False
         
         # Render everything
         if game_state == "menu":

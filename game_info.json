@@ -1,0 +1,174 @@
+{
+  "game_modes": {
+    "battle": {
+      "title": "Battle Mode",
+      "description": "Competitive PvP mode with timer and kill tracking",
+      "objective": "Eliminate opponents to score kills. Most kills when timer ends wins!",
+      "timer": {
+        "duration": "5 minutes",
+        "warning": "Timer flashes red when under 1 minute",
+        "end_condition": "Game ends when timer reaches zero"
+      },
+      "respawn_system": {
+        "enabled": true,
+        "respawn_time": "2 seconds",
+        "protection_time": "2 seconds after respawn",
+        "mechanics": [
+          "Worm becomes immobile during respawn countdown",
+          "All resources fully restored upon respawn",
+          "Spawn protection prevents all combat actions",
+          "Visual cue: body flickers black during respawn",
+          "Visual cue: body flickers white during protection"
+        ]
+      },
+      "scoring": {
+        "kills": "Track eliminations of other worms",
+        "deaths": "Track times eliminated by others",
+        "attribution": "Proper kill credit for tools, explosions, fall damage"
+      }
+    },
+    "coop": {
+      "title": "Co-op Mode",
+      "description": "Collaborative survival mode",
+      "objective": "Work together to dig, explore, and survive",
+      "timer": {
+        "duration": "Unlimited",
+        "warning": "No time pressure",
+        "end_condition": "Manual exit only"
+      },
+      "respawn_system": {
+        "enabled": true,
+        "respawn_time": "2 seconds",
+        "protection_time": "2 seconds after respawn",
+        "mechanics": [
+          "Same respawn mechanics as battle mode",
+          "Focus on getting back to collaborative work",
+          "Resource sharing and teamwork encouraged"
+        ]
+      },
+      "scoring": {
+        "kills": "Not applicable - avoid friendly fire",
+        "deaths": "Tracked for safety awareness",
+        "attribution": "Focus on accident prevention"
+      }
+    }
+  },
+  "controls": {
+    "movement": {
+      "left": "A key",
+      "right": "D key",
+      "jump": "W key",
+      "description": "Standard WASD movement controls"
+    },
+    "tools": {
+      "drill": {
+        "key": "F key",
+        "description": "Primary digging tool for close combat",
+        "damage": "High damage to enemies",
+        "range": "Close range contact",
+        "resource": "No energy required"
+      },
+      "laser": {
+        "key": "Mouse click and drag",
+        "description": "Precision beam for long-range attacks",
+        "damage": "Light but accurate damage",
+        "range": "Long distance line-of-sight",
+        "resource": "Uses laser energy"
+      },
+      "torch": {
+        "key": "Right mouse button",
+        "description": "Area digging and moderate damage",
+        "damage": "Medium damage in small area",
+        "range": "Short to medium range",
+        "resource": "Consumes gas fuel"
+      },
+      "dynamite": {
+        "key": "Period (.) key",
+        "description": "Powerful throwable explosive",
+        "damage": "Heavy damage, reduced by distance",
+        "range": "Thrown projectile with curved arc",
+        "resource": "Limited supply per respawn"
+      }
+    },
+    "special": {
+      "tombstone_loot": {
+        "key": "E key when near tombstone",
+        "description": "Collect resources from defeated opponents",
+        "mechanics": "Gain portion of their resources, tombstone disappears"
+      }
+    }
+  },
+  "mechanics": {
+    "health_system": {
+      "max_hp": 100,
+      "body_segments": {
+        "100-81%": "Full worm body",
+        "80-61%": "Slightly damaged",
+        "60-41%": "Moderately damaged", 
+        "40-21%": "Heavily damaged",
+        "20-1%": "Critical condition - head only",
+        "0%": "Defeated - becomes tombstone"
+      },
+      "hit_detection": "Body parts can be hit individually"
+    },
+    "fall_damage": {
+      "threshold": "Moderate height drops",
+      "calculation": "Increasing damage with height",
+      "maximum": "Very high falls can be deadly",
+      "prevention": "Dig safe paths and avoid cliffs"
+    },
+    "resources": {
+      "gas": {
+        "purpose": "Powers torch tool",
+        "restoration": "Full restore on respawn",
+        "conservation": "Manage usage carefully"
+      },
+      "laser_energy": {
+        "purpose": "Powers laser tool", 
+        "restoration": "Full restore on respawn",
+        "conservation": "Precise usage for efficiency"
+      },
+      "dynamite": {
+        "purpose": "Explosive area damage",
+        "restoration": "Full restore on respawn",
+        "trajectory": "Enhanced arc for better throwing"
+      }
+    },
+    "environmental": {
+      "terrain": "Fully destructible environment",
+      "physics": "Realistic gravity and falling",
+      "regeneration": "No terrain regeneration"
+    }
+  },
+  "ui_information": {
+    "health_bar": "Visual HP indicator with color coding",
+    "resource_bars": "Gas and laser energy levels",
+    "equipment_display": "Dynamite count and availability",
+    "combat_stats": "Kills and deaths (battle mode)",
+    "timer_display": "Countdown with warning effects (battle mode)",
+    "worm_names": "Player identification with state indicators"
+  },
+  "tips": {
+    "battle_mode": [
+      "Use spawn protection time to assess battlefield",
+      "Target weakened opponents for easier eliminations",
+      "Control high ground for dynamite throwing advantage",
+      "Watch the timer - positioning matters near end game",
+      "Loot tombstones for resource advantage"
+    ],
+    "coop_mode": [
+      "Coordinate digging efforts to avoid accidents",
+      "Share resource management strategies",
+      "Create safe paths to prevent fall damage",
+      "Use respawn system to regroup after accidents",
+      "Build interesting tunnel networks together"
+    ],
+    "general": [
+      "Learn tool ranges and damage values",
+      "Master dynamite trajectory for long-range attacks",
+      "Use environment destruction strategically",
+      "Monitor HP to know your vulnerability level",
+      "Practice movement and tool switching"
+    ]
+  }
+}

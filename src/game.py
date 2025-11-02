@@ -6,8 +6,11 @@ Handles overall game state, coordination between systems
 import pygame
 import math
 import time
+import random
 from src.terrain import Terrain
 from src.worm import Worm
+from src.explosion import Explosion, ExplosionPresets
+from src.tombstone import Tombstone
 from src.config import *
 
 class Game:
@@ -45,6 +48,7 @@ class Game:
             worm.color = worm_config['color']
             worm.is_human = worm_config['is_human']
             worm.player_id = worm_config['player_id']
+            worm.tools_mode = config.get('tools_mode', 'standard')
             self.worms.append(worm)
         
         self.goal_pos = (MAP_WIDTH * TILE_SIZE - 100, MAP_HEIGHT * TILE_SIZE + terrain_y_offset - 100)
@@ -54,6 +58,22 @@ class Game:
         # Camera follows the current active worm
         self.camera_x = 0
         self.camera_y = 0
+        
+        # Explosion system
+        self.active_explosions = []
+        
+        # Death and respawn system
+        self.tombstones = []
+        
+        # Battle timer system
+        self.battle_timer_enabled = config.get('game_mode') == 'battle'  # Enable for battle mode
+        # Use configured battle length or default
+        battle_minutes = config.get('battle_length_minutes', 5)  # Default to 5 minutes
+        self.battle_timer_duration = battle_minutes * 60  # Convert to seconds
+        self.battle_timer = self.battle_timer_duration  # Timer in seconds
+        self.battle_timer_start_time = time.time()  # Track when game started
+        self.timer_flash_state = False  # For flashing effect
+        self.timer_flash_timer = 0.0  # Track flash timing
         
     def handle_event(self, event):
         """Handle input events"""
@@ -175,12 +195,44 @@ class Game:
         if self.paused:
             return
             
+        # Update battle timer if enabled
+        if self.battle_timer_enabled:
+            elapsed_time = time.time() - self.battle_timer_start_time
+            self.battle_timer = max(0, self.battle_timer_duration - elapsed_time)
+            
+            # Update flash timer for warning effect
+            if self.battle_timer <= BATTLE_TIMER_WARNING_TIME:
+                self.timer_flash_timer += dt
+                if self.timer_flash_timer >= BATTLE_TIMER_FLASH_RATE:
+                    self.timer_flash_state = not self.timer_flash_state
+                    self.timer_flash_timer = 0.0
+            
+            # Check if time is up
+            if self.battle_timer <= 0:
+                return "show_endgame_stats"  # Signal to show stats screen
+            
+            
         # Update wormhole animation
         self.wormhole_animation_time += dt
         
         # Update all worms
         for worm in self.worms:
-            worm.update(dt, self.terrain)
+            death_info = worm.update(dt, self.terrain)
+            # Handle any death from fall damage
+            if death_info and isinstance(death_info, dict) and death_info.get('needs_death_handling'):
+                self._handle_worm_death(worm, death_info.get('damage', 0), death_info.get('killer'))
+            
+        # Check for tool damage between worms
+        self._check_tool_damage()
+        
+        # Update explosions
+        self._update_explosions(dt)
+        
+        # Handle death and respawn
+        self._handle_death_and_respawn(dt)
+        
+        # Update tombstones
+        self._update_tombstones(dt)
         
         # Check if any worm reached goal
         for worm in self.worms:
@@ -191,6 +243,209 @@ class Game:
                 self._next_level()
                 break
             
+    def _check_tool_damage(self):
+        """Check if any worms are damaged by tools used by other worms"""
+        for attacker in self.worms:
+            if attacker.is_dead or not attacker.tool_used_this_frame:
+                continue
+                
+            tool_info = attacker.tool_used_this_frame
+            tool = tool_info['tool']
+            target_x = tool_info['target_x']
+            target_y = tool_info['target_y']
+            head_x, head_y = tool_info['attacker_pos']
+            
+            # Check damage to other worms based on tool type
+            for victim in self.worms:
+                if victim == attacker or victim.is_dead:
+                    continue
+                    
+                victim_x, victim_y = victim.body_segments[0]
+                
+                # Check if victim is in tool's damage area
+                if tool == "drill":
+                    # Drill: Check if victim is in drill rectangle below attacker
+                    drill_left = head_x - DRILL_WIDTH // 2
+                    drill_right = head_x + DRILL_WIDTH // 2
+                    drill_top = head_y + WORM_RADIUS
+                    drill_bottom = head_y + WORM_RADIUS + DRILL_DEPTH
+                    
+                    if (drill_left <= victim_x <= drill_right and 
+                        drill_top <= victim_y <= drill_bottom):
+                        damage_result = victim.take_damage(DRILL_DAMAGE, attacker)
+                        if damage_result and isinstance(damage_result, dict) and damage_result.get('needs_death_handling'):
+                            self._handle_worm_death(victim, DRILL_DAMAGE, attacker)
+                        
+                elif tool == "laser":
+                    # Laser: Check if victim is on the laser line
+                    # Calculate distance from victim to laser line
+                    # Line from (head_x, head_y) to (target_x, target_y)
+                    line_length = math.sqrt((target_x - head_x)**2 + (target_y - head_y)**2)
+                    if line_length > 0:
+                        # Distance from point to line formula
+                        distance = abs((target_y - head_y) * victim_x - (target_x - head_x) * victim_y + 
+                                     target_x * head_y - target_y * head_x) / line_length
+                        
+                        # Check if victim is close to laser line and within laser range
+                        victim_distance_from_start = math.sqrt((victim_x - head_x)**2 + (victim_y - head_y)**2)
+                        if distance <= LASER_WIDTH // 2 and victim_distance_from_start <= line_length:
+                            damage_result = victim.take_damage(LASER_DAMAGE, attacker)
+                            if damage_result and isinstance(damage_result, dict) and damage_result.get('needs_death_handling'):
+                                self._handle_worm_death(victim, LASER_DAMAGE, attacker)
+                            
+                elif tool == "torch":
+                    # Torch: Check if victim is in torch cone
+                    if 'direction_angle' in tool_info:
+                        direction_angle = tool_info['direction_angle']
+                        
+                        # Calculate angle from attacker to victim
+                        victim_angle = math.atan2(victim_y - head_y, victim_x - head_x)
+                        
+                        # Check if victim is within torch cone
+                        angle_diff = abs(victim_angle - direction_angle)
+                        # Normalize angle difference to [-pi, pi]
+                        while angle_diff > math.pi:
+                            angle_diff -= 2 * math.pi
+                        while angle_diff < -math.pi:
+                            angle_diff += 2 * math.pi
+                            
+                        victim_distance = math.sqrt((victim_x - head_x)**2 + (victim_y - head_y)**2)
+                        cone_half_angle = math.radians(TORCH_CONE_ANGLE / 2)
+                        
+                        if abs(angle_diff) <= cone_half_angle and victim_distance <= TORCH_RANGE:
+                            damage_result = victim.take_damage(TORCH_DAMAGE, attacker)
+                            if damage_result and isinstance(damage_result, dict) and damage_result.get('needs_death_handling'):
+                                self._handle_worm_death(victim, TORCH_DAMAGE, attacker)
+        
+        # Check dynamite explosions
+        for worm in self.worms:
+            if worm.is_dead:
+                continue
+                
+            # Check for exploded dynamites and create explosions
+            for dynamite in worm.thrown_dynamites[:]:  # Copy list to safely modify
+                if hasattr(dynamite, 'exploded_this_frame') and dynamite.exploded_this_frame:
+                    explosion_x, explosion_y = dynamite.get_position()
+                    
+                    # Remove the exploded dynamite
+                    worm.thrown_dynamites.remove(dynamite)
+                    
+                    # Create explosion animation and handle damage
+                    explosion = ExplosionPresets.dynamite_explosion(explosion_x, explosion_y, worm)
+                    damaged_worms = explosion.apply_damage(self.worms)
+                    
+                    # Handle any deaths from explosion
+                    for damaged_worm, damage, distance, needs_death_handling, damage_result in damaged_worms:
+                        if needs_death_handling:
+                            self._handle_worm_death(damaged_worm, damage, worm)
+                    
+                    self.active_explosions.append(explosion)
+    
+    def _update_explosions(self, dt):
+        """Update all active explosions"""
+        for explosion in self.active_explosions[:]:  # Copy list to safely modify
+            if not explosion.update(dt):
+                # Explosion finished, remove it
+                self.active_explosions.remove(explosion)
+    
+    def create_explosion(self, x, y, radius, damage, source_worm=None):
+        """Create an explosion at the specified location"""
+        explosion = Explosion(x, y, radius, damage, source_worm)
+        explosion.apply_damage(self.worms)
+        self.active_explosions.append(explosion)
+        return explosion
+    
+    def _create_tombstone(self, tombstone_data):
+        """Create a tombstone from death data"""
+        tombstone = Tombstone(
+            tombstone_data['x'],
+            tombstone_data['y'],
+            tombstone_data['gas'],
+            tombstone_data['dynamite'],
+            tombstone_data['deceased_name']
+        )
+        self.tombstones.append(tombstone)
+        
+    def _handle_death_and_respawn(self, dt):
+        """Handle worm death and respawn logic"""
+        for worm in self.worms:
+            if worm.is_respawning:
+                # Update respawn timer for respawning worms
+                ready_to_complete_respawn = worm.update_respawn_timer(dt)
+                
+                if ready_to_complete_respawn:
+                    # Complete the respawn process (transition to spawn protection)
+                    worm.respawn()
+            elif not worm.is_dead:
+                # Update spawn protection for living worms
+                if worm.spawn_protection > 0:
+                    worm.spawn_protection -= dt
+                    
+    def _handle_worm_death(self, worm, damage, attacker):
+        """Handle worm death with immediate relocation and tombstone creation"""
+        # Find a safe spawn location for immediate relocation
+        spawn_x, spawn_y = self._find_safe_spawn_location(worm)
+        
+        # Call die method with new location
+        tombstone_data = worm.die(attacker, spawn_x, spawn_y)
+        
+        # Create tombstone if data was returned
+        if tombstone_data:
+            self._create_tombstone(tombstone_data)
+        
+        return tombstone_data
+                    
+    def _find_safe_spawn_location(self, respawning_worm):
+        """Find a safe location to spawn away from other worms"""
+        # Try to spawn near the top of the map, but not too close to other worms
+        attempts = 0
+        max_attempts = 20
+        
+        while attempts < max_attempts:
+            # Random X position across the map
+            spawn_x = random.uniform(WORM_RADIUS + 50, SCREEN_WIDTH - WORM_RADIUS - 50)
+            # Spawn in upper portion of the map
+            spawn_y = random.uniform(UI_HEIGHT + 100, UI_HEIGHT + 300)
+            
+            # Check distance from other living worms
+            safe = True
+            for other_worm in self.worms:
+                if other_worm != respawning_worm and not other_worm.is_dead:
+                    other_x, other_y = other_worm.body_segments[0]
+                    distance = math.sqrt((spawn_x - other_x)**2 + (spawn_y - other_y)**2)
+                    if distance < MIN_SPAWN_DISTANCE:
+                        safe = False
+                        break
+                        
+            # Check if spawn location is not inside terrain
+            if safe and not self.terrain.is_solid(spawn_x, spawn_y):
+                # Find ground level below spawn point
+                ground_y = spawn_y
+                while ground_y < SCREEN_HEIGHT - 50 and not self.terrain.is_solid(spawn_x, ground_y):
+                    ground_y += 5
+                    
+                # Spawn a bit above ground
+                return spawn_x, max(spawn_y, ground_y - WORM_RADIUS - 10)
+                
+            attempts += 1
+            
+        # Fallback: spawn at default location if no safe spot found
+        return 200, UI_HEIGHT + 150
+        
+    def _update_tombstones(self, dt):
+        """Update tombstone animations and handle looting"""
+        for tombstone in self.tombstones[:]:  # Copy list to safely modify
+            tombstone.update(dt)
+            
+            # Check if any living worm can loot this tombstone
+            for worm in self.worms:
+                if not worm.is_dead and tombstone.can_be_looted_by(worm):
+                    # For now, auto-loot when near. Later we can add key press requirement
+                    if tombstone.loot(worm):
+                        # Tombstone was successfully looted, remove it
+                        self.tombstones.remove(tombstone)
+                        break
+    
     def _next_level(self):
         """Transition to the next level"""
         self.level += 1
@@ -249,9 +504,18 @@ class Game:
         for worm in self.worms:
             worm.render(self.screen, camera_x, camera_y)
             
-            # Render thrown dynamites for each worm
+        # Render explosions
+        for explosion in self.active_explosions:
+            explosion.render(self.screen, camera_x, camera_y)
+            
+        # Render thrown dynamites for each worm
+        for worm in self.worms:
             for dynamite in worm.thrown_dynamites:
                 dynamite.render(self.screen, camera_x, camera_y)
+                
+        # Render tombstones
+        for tombstone in self.tombstones:
+            tombstone.render(self.screen, camera_x, camera_y)
         
         # Render UI
         self._render_ui()
@@ -410,18 +674,26 @@ class Game:
             x_start = i * player_width + 10
             y_start = 10
             
-            # Player name with color indicator
-            name_color = worm.color if hasattr(worm, 'color') else BLACK
+            # Player name with color indicator (fluctuates during respawn/protection)
+            if worm.is_respawning or worm.spawn_protection > 0:
+                # Use the same fluctuating colors as the worm body
+                name_color = worm.get_render_color()
+            else:
+                name_color = worm.color if hasattr(worm, 'color') else BLACK
             name_text = font.render(worm.name, True, name_color)
             self.screen.blit(name_text, (x_start, y_start))
             
-            # HP Bar
+            # === HEALTH SECTION ===
             hp_y = y_start + 25
             bar_width = min(120, player_width - 20)
             bar_height = 8
             
-            # Background bar
-            pygame.draw.rect(self.screen, GRAY, (x_start, hp_y, bar_width, bar_height))
+            # HP text above bar
+            hp_text = tiny_font.render(f"HP: {worm.hp}/{worm.max_hp}", True, BLACK)
+            self.screen.blit(hp_text, (x_start, hp_y))
+            
+            # HP background bar
+            pygame.draw.rect(self.screen, GRAY, (x_start, hp_y + 12, bar_width, bar_height))
             
             # HP level bar
             hp_ratio = worm.hp / worm.max_hp
@@ -432,65 +704,100 @@ class Game:
                 hp_color = YELLOW
             else:
                 hp_color = RED
-            pygame.draw.rect(self.screen, hp_color, (x_start, hp_y, hp_bar_width, bar_height))
+            pygame.draw.rect(self.screen, hp_color, (x_start, hp_y + 12, hp_bar_width, bar_height))
             
-            # HP text
-            hp_text = tiny_font.render(f"HP: {worm.hp}/{worm.max_hp}", True, BLACK)
-            self.screen.blit(hp_text, (x_start, hp_y + 10))
+            # === GAS SECTION ===
+            gas_y = hp_y + 30
             
-            # Gas Bar
-            gas_y = hp_y + 25
-            
-            # Background bar
-            pygame.draw.rect(self.screen, GRAY, (x_start, gas_y, bar_width, bar_height))
-            
-            # Gas level bar
-            gas_ratio = worm.gas / MAX_GAS
-            gas_bar_width = int(bar_width * gas_ratio)
-            gas_color = GREEN if gas_ratio > 0.3 else (YELLOW if gas_ratio > 0.1 else RED)
-            pygame.draw.rect(self.screen, gas_color, (x_start, gas_y, gas_bar_width, bar_height))
-            
-            # Gas text
-            gas_text = tiny_font.render(f"GAS: {worm.gas}/{MAX_GAS}", True, BLACK)
-            self.screen.blit(gas_text, (x_start, gas_y + 10))
-            
-            # Laser Battery Bar
-            battery_y = gas_y + 25
-            
-            # Background bar
-            pygame.draw.rect(self.screen, GRAY, (x_start, battery_y, bar_width, bar_height))
-            
-            # Battery level bar
-            battery_ratio = worm.laser_battery / 100.0
-            battery_bar_width = int(bar_width * battery_ratio)
-            
-            # Color based on battery level and cooldown status
-            if worm.laser_cooldown_timer > 0:
-                battery_color = RED  # Red when in cooldown
-            elif battery_ratio > 0.6:
-                battery_color = CYAN  # Cyan for high battery (laser color)
-            elif battery_ratio > 0.3:
-                battery_color = YELLOW
+            # Only show weapon stats in standard mode
+            if getattr(worm, 'tools_mode', 'standard') == 'standard':
+                # Gas text above bar
+                gas_text = tiny_font.render(f"GAS: {worm.gas}/{MAX_GAS}", True, BLACK)
+                self.screen.blit(gas_text, (x_start, gas_y))
+                
+                # Gas background bar
+                pygame.draw.rect(self.screen, GRAY, (x_start, gas_y + 12, bar_width, bar_height))
+                
+                # Gas level bar
+                gas_ratio = worm.gas / MAX_GAS
+                gas_bar_width = int(bar_width * gas_ratio)
+                gas_color = GREEN if gas_ratio > 0.3 else (YELLOW if gas_ratio > 0.1 else RED)
+                pygame.draw.rect(self.screen, gas_color, (x_start, gas_y + 12, gas_bar_width, bar_height))
+                
+                # === LASER SECTION ===
+                battery_y = gas_y + 30
+                
+                # Battery text above bar with cooldown indicator
+                if worm.laser_cooldown_timer > 0:
+                    battery_text = tiny_font.render(f"LASER: COOLDOWN {worm.laser_cooldown_timer:.1f}s", True, BLACK)
+                else:
+                    battery_text = tiny_font.render(f"LASER: {int(worm.laser_battery)}%", True, BLACK)
+                self.screen.blit(battery_text, (x_start, battery_y))
+                
+                # Laser background bar
+                pygame.draw.rect(self.screen, GRAY, (x_start, battery_y + 12, bar_width, bar_height))
+                
+                # Battery level bar
+                battery_ratio = worm.laser_battery / 100.0
+                battery_bar_width = int(bar_width * battery_ratio)
+                
+                # Color based on battery level and cooldown status
+                if worm.laser_cooldown_timer > 0:
+                    battery_color = RED  # Red when in cooldown
+                elif battery_ratio > 0.6:
+                    battery_color = CYAN  # Cyan for high battery (laser color)
+                elif battery_ratio > 0.3:
+                    battery_color = YELLOW
+                else:
+                    battery_color = RED
+                
+                pygame.draw.rect(self.screen, battery_color, (x_start, battery_y + 12, battery_bar_width, bar_height))
+                
+                # === EQUIPMENT SECTION ===
+                # Dynamites count with icon color
+                dynamite_text = tiny_font.render(f"Dynamites: {worm.dynamite_count}", True, DYNAMITE_INDICATOR_COLOR)
+                self.screen.blit(dynamite_text, (x_start, battery_y + 30))
+                
+                # === COMBAT STATS SECTION ===
+                # Kill/Death stats with distinct formatting
+                kd_text = tiny_font.render(f"K/D: {worm.kills}/{worm.deaths}", True, BLACK)
+                self.screen.blit(kd_text, (x_start, battery_y + 45))
             else:
-                battery_color = RED
-            
-            pygame.draw.rect(self.screen, battery_color, (x_start, battery_y, battery_bar_width, bar_height))
-            
-            # Battery text with cooldown indicator
-            if worm.laser_cooldown_timer > 0:
-                battery_text = tiny_font.render(f"LASER: COOLDOWN {worm.laser_cooldown_timer:.1f}s", True, BLACK)
-            else:
-                battery_text = tiny_font.render(f"LASER: {int(worm.laser_battery)}%", True, BLACK)
-            self.screen.blit(battery_text, (x_start, battery_y + 10))
-            
-            # Dynamites count
-            dynamite_text = tiny_font.render(f"Dynamites: {worm.dynamite_count}", True, BLACK)
-            self.screen.blit(dynamite_text, (x_start, battery_y + 25))
+                # In unlimited mode, show tools mode and only K/D stats
+                tools_text = tiny_font.render("UNLIMITED TOOLS", True, (0, 255, 100))  # Green text
+                self.screen.blit(tools_text, (x_start, gas_y))
+                
+                # === COMBAT STATS SECTION ===
+                # Kill/Death stats with distinct formatting
+                kd_text = tiny_font.render(f"K/D: {worm.kills}/{worm.deaths}", True, BLACK)
+                self.screen.blit(kd_text, (x_start, gas_y + 20))
         
         # Level indicator at top right
         level_text = font.render(f"LEVEL {self.level}", True, BLACK)
         level_rect = level_text.get_rect(right=SCREEN_WIDTH-20, y=15)
         self.screen.blit(level_text, level_rect)
+        
+        # Battle timer display (if enabled)
+        if self.battle_timer_enabled:
+            minutes = int(self.battle_timer // 60)
+            seconds = int(self.battle_timer % 60)
+            timer_text = f"{minutes:02d}:{seconds:02d}"
+            
+            # Choose color and flash effect for warning
+            if self.battle_timer <= BATTLE_TIMER_WARNING_TIME:
+                timer_color = RED if self.timer_flash_state else WHITE
+            else:
+                timer_color = BLACK
+            
+            # Render timer text (positioned lower to avoid cutoff)
+            timer_surface = font.render(timer_text, True, timer_color)
+            timer_rect = timer_surface.get_rect(centerx=SCREEN_WIDTH//2, y=35)
+            self.screen.blit(timer_surface, timer_rect)
+            
+            # Add "TIME" label above the timer
+            time_label = small_font.render("TIME", True, timer_color)
+            time_label_rect = time_label.get_rect(centerx=SCREEN_WIDTH//2, y=15)
+            self.screen.blit(time_label, time_label_rect)
     
     def _render_pause_menu(self):
         """Render the pause menu overlay"""
@@ -583,3 +890,19 @@ class Game:
             pygame.draw.rect(self.screen, (0, 0, 0, 128), bg_rect)
             
             self.screen.blit(fps_text, fps_rect)
+    
+    def get_game_stats(self):
+        """
+        Collect and return game statistics for all players
+        """
+        stats = {}
+        for i, worm in enumerate(self.worms):
+            stats[i] = {
+                'name': getattr(worm, 'name', f'Player {i+1}'),
+                'color': getattr(worm, 'color', (255, 255, 255)),
+                'kills': worm.kills,
+                'deaths': worm.deaths,
+                'fall_deaths': getattr(worm, 'fall_deaths', 0),
+                'self_deaths': getattr(worm, 'self_deaths', 0)
+            }
+        return stats

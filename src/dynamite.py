@@ -80,17 +80,18 @@ class ThrownDynamite:
             direction_y = 0
         
         # Calculate velocity based on power (0-100)
-        base_speed = 200  # Base throw speed
+        base_speed = 250  # Increased base throw speed for higher arc
         speed_multiplier = 0.5 + (power / 100) * 1.5  # 0.5x to 2x speed
         velocity = base_speed * speed_multiplier
         
         # Set velocity components
         self.vel_x = direction_x * velocity
-        self.vel_y = direction_y * velocity - 50  # Slight upward bias for arc
+        self.vel_y = direction_y * velocity - 75  # Increased upward bias for higher arc
         
         # Physics properties
         self.gravity = GRAVITY  # Use game gravity
         self.has_exploded = False
+        self.exploded_this_frame = False  # Flag for damage checking
         
     def update(self, dt, terrain=None):
         """Update dynamite position and check for explosion"""
@@ -124,6 +125,7 @@ class ThrownDynamite:
         # Check for explosion (timer-based)
         if elapsed >= DYNAMITE_FUSE_TIME and not self.has_exploded:
             self.has_exploded = True
+            self.exploded_this_frame = True  # Set flag for damage checking
             # Create and play explosion sound
             self._create_explosion_sound()
             if self.explosion_sound:

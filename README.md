@@ -126,7 +126,9 @@ matopeli_pygame/
     - the direction of the drill can be changed (keep the shape and size of the current indicator box )
         - use the same direction change system as with laser for example
     - add speed boost - 200% speed (create a graphical effect around the worm - maybe a blueish glow)
+    - hp boost item (looks like med-kit) - effect: greenish bubbles rising from the worm 
     - add damage from dropping (increasing damage for drops that are over 50px (variable for this so it can be tested and changed))
+    
 
 
 
@@ -135,6 +137,15 @@ matopeli_pygame/
 - co-op battle mode
 - textures for the tool/weapon in use atm. 
 - items and weapons
-    - parachute
+    - parachute / umbrella
     - rope gun 
-    
+- multiplayer 
+    - direct ip?
+    - through server
+- explosion knockback
+
+## known bugs
+    - worm dissapears
+        - player 1 dissapeared when drilling - tool usage was still possible (based on the sounds), but no visual
+        feedback from the worm
+        
