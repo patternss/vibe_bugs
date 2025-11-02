@@ -68,3 +68,5 @@ matopeli_pygame/
 - Sound effects and music
 - Better graphics and animations
 - Enemy creatures in the tunnels
+# vibe_bugs
+completely vibe coded 2d game where bugs fight or co-op against creeps. 
